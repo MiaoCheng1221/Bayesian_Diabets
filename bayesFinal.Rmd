@@ -1,0 +1,377 @@
+---
+title: "bayesian final project"
+author: "Xiaodan Chen, Xiaoyu Wang, Cheng Miao"
+date: "4/13/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+diabetes<- read.csv('diabetes.csv')
+tail(diabetes)
+```
+
+```{r}
+#check missing data
+NA_rate<-colMeans(sapply(diabetes,is.na))
+NA_rate
+#data is clean without missing value
+```
+
+
+```{r}
+#basic information
+print('dim(diabetes)-------------------------------------------------')
+dim(diabetes)
+
+print('"column names"------------------------------------------------')
+names(diabetes)
+
+print('summary(diabetes)---------------------------------------------')
+summary(diabetes)
+
+print('str(diabetes)-------------------------------------------------')
+str(diabetes)
+```
+
+```{r}
+#transform 'outcome' into factor type
+diabetes$Outcome <- factor(diabetes$Outcome)
+#scale
+diabetes<- diabetes[-which(diabetes[2:8]==0),] #except for pregnancies, there shouldn't be 0 in any predictors
+diabetes[1:8] <- scale(diabetes[1:8])
+#check
+head(diabetes)
+```
+
+```{r}
+# modify the data column names slightly for easier typing
+names(diabetes)[3] <- "bp"
+names(diabetes)[4] <- "st"
+names(diabetes)[7] <- "dpf"
+names(diabetes) <- tolower(names(diabetes))
+#check new dimensionality
+dim(diabetes)
+```
+
+```{r}
+names(diabetes)
+```
+```{r}
+library(rstanarm)
+t_prior <- student_t(df = 7, location = 0, scale = 2.5)
+prior = t_prior
+prior_intercept = t_prior
+```
+
+
+stan_glm
+```{r}
+# preparing the inputs
+x <- model.matrix(outcome ~ . - 1, data = diabetes)
+y <- diabetes$outcome
+```
+
+MCMC
+
+```{r}
+out <- glm(y ~ x, data = diabetes, family = binomial(), x = T)
+summary(out)
+```
+
+```{r}
+x_mc <- out$x
+y_mc <- out$y
+#The log unnormalized posterior
+lupost <- function(beta, x_mc, y_mc) {
+    eta <- as.numeric(x_mc %*% beta)
+    logp <- ifelse(eta < 0, eta - log1p(exp(eta)), -log1p(exp(-eta)))
+    logq <- ifelse(eta < 0, -log1p(exp(eta)), -eta - log1p(exp(-eta)))
+    logl <- sum(logp[y == 1]) + sum(logq[y == 0])
+    return(logl - sum(beta^2)/8)
+}
+```
+
+```{r}
+#install.packages('mcmc')
+library(mcmc)
+set.seed(42) #get reproducible results
+beta.init <- as.numeric(coefficients(out))
+out <- metrop(lupost, beta.init, 1000, x = x_mc, y = y_mc)
+names(out)
+```
+
+```{r}
+out <- metrop(out, scale = 0.1, x = x_mc, y = y_mc)
+out$accept # proposal to get a higher acceptance rate around 20%
+```
+
+```{r}
+out <- metrop(out, nbatch = 10000, x = x_mc, y = y_mc)
+out$accept
+out$time
+plot(ts(out$batch)) #get the time series plot
+```
+
+```{r}
+# autocorrelation plot of MCMC output
+acf(out$batch) # get the correalation plot for each series. One by one
+```
+
+```{r}
+#Monte Carlo Estimates and Standard Errors
+out <- metrop(out, nbatch = 100, blen = 100, outfun = function(z, ...) c(z, z^2), x = x_mc, y = y_mc)
+out$accept
+```
+
+```{r}
+# calculate the time
+out$time
+nrow(out$batch)
+out$batch[1, ]
+```
+
+
+```{r}
+#The grand means 
+apply(out$batch, 2, mean)
+```
+
+```{r}
+# posterior variances
+foo <- apply(out$batch, 2, mean)
+mu <- foo[1:9]
+sigmasq <- foo[10:18] - mu^2
+mu
+```
+
+```{r}
+#Monte Carlo standard errors (MCSE)
+mu.muce <- apply(out$batch[, 1:9], 2, sd)/sqrt(out$nbatch)
+mu.muce
+```
+
+```{r}
+#variance is estimated
+u <- out$batch[, 1:9]
+v <- out$batch[, 10:18]
+ubar <- apply(u, 2, mean)
+vbar <- apply(v, 2, mean)
+deltau <- sweep(u, 2, ubar)
+deltav <- sweep(v, 2, vbar)
+foo <- sweep(deltau, 2, ubar, "*")
+sigmasq.mcse <- sqrt(apply((deltav - 2 * foo)^2, 2, mean)/out$nbatch)
+sigmasq.mcse    #Functions of Means
+```
+
+```{r} 
+
+out <- metrop(out, nbatch = 500, blen = 400, x = x_mc, y = y_mc)
+out$accept
+#......................................
+# The first 9 numbers are the Monte Carlo estimates of the posterior means. The second 9 numbers are the Monte Carlo estimates of the posterior ordinary second moments.
+out$time
+foo <- apply(out$batch, 2, mean)
+mu <- foo[1:9]
+sigmasq <- foo[10:19] - mu^2
+mu
+
+mu.muce <- apply(out$batch[, 1:9], 2, sd)/sqrt(out$nbatch)
+mu.muce
+```
+
+```{r}
+u <- out$batch[, 1:9]
+v <- out$batch[, 10:18]
+ubar <- apply(u, 2, mean)
+vbar <- apply(v, 2, mean)
+deltau <- sweep(u, 2, ubar)
+deltav <- sweep(v, 2, vbar)
+foo <- sweep(deltau, 2, ubar, "*")
+sigmasq.mcse <- sqrt(apply((deltav - 2 * foo)^2, 2, mean)/out$nbatch)
+sigmasq.mcse
+```
+
+```{r}
+sigma <- sqrt(sigmasq)
+sigma.mcse <- sigmasq.mcse/(2 * sigma)
+sigma.mcse
+```
+
+```{r}
+#First the posterior means
+library(xtable)
+data1 <- rbind(mu, mu.muce)
+colnames(data1) <- c("constant", "x1", "x2", "x3", "x4","x5","x6","x7","x8")
+rownames(data1) <- c("estimate", "MCSE")
+data1.table <- xtable(data1, digits = 5)
+#print(data1.table, type = "html")
+```
+
+```{r}
+# then the posterior variances
+data2 <- rbind(sigmasq, sigmasq.mcse)
+colnames(data2) <- c("constant", "x1", "x2", "x3", "x4","x5","x6","x7","x8","x9")
+rownames(data2) <- c("estimate", "MCSE")
+data2.table <- xtable(data2, digits = 5)
+#print(data2.table, type = "html")
+```
+
+```{r}
+# the posterior standard deviations 
+data3 <- rbind(sigma, sigma.mcse)
+colnames(data3) <- c("constant", "x1", "x2", "x3", "x4", "x5","x6","x7","x8","x9")
+rownames(data3) <- c("estimate", "MCSE")
+data3.table <- xtable(data3, digits = 5)
+#print(data3.table, type = "html")
+```
+
+
+End MCMC
+
+```{r}
+install.packages(rstanarm)
+library(rstanarm)
+
+#prior
+t_prior <- student_t(df = 7, location = 0, scale = 2.5)
+
+#stan_glm
+post <- stan_glm(outcome ~ ., data = diabetes,
+                 family = binomial(link = "logit"), 
+                 prior = t_prior, prior_intercept = t_prior,
+                 seed = 1)
+
+```
+
+```{r}
+#getTrainPerf(post)
+```
+
+
+```{r}
+library(ggplot2)
+#plot distribution of posterior with all variables
+pplot<-plot(post, "areas", prob = 0.95, prob_outer = 1)
+pplot+ geom_vline(xintercept = 0) + labs(title = "Distribution   of   Posterior")
+```
+
+
+
+```{r}
+# compute coefficients median 
+round(coef(post), 2)
+```
+
+```{r}
+#coefficients in a specific confidence interval
+round(posterior_interval(post, prob = 0.9), 2)
+```
+
+
+```{r}
+# we decided to use median coefficients to do prediction
+z= 0.43*diabetes$pregnancies + 1.19*diabetes$glucose -0.27*diabetes$bp -0.15*diabetes$insulin +0.69*diabetes$bmi +0.32*diabetes$dpf +0.15*diabetes$age
+y<- 1/(1+exp(-z))
+# diabetes['pred'] is the probability estimated by median coefficients from coefficients posterior distributions
+diabetes$pred <- y
+# for diabetes['pred2'], we set a threshold 0.5, if the probability is more than 0.5, we set class it into class '1', vice versa. 
+diabetes$pred2[diabetes$pred>0.5] <- 1
+diabetes$pred2[diabetes$pred<=0.5] <- 0
+```
+
+
+```{r}
+# compute AUCs 
+library(pROC)
+plot.roc(diabetes$outcome, diabetes$pred ,percent=TRUE,col="#1c61b6",  print.auc=TRUE)
+#style the graph
+legend("bottomright", legend=c("Posterior ROC"), col=c("#1c61b6", "#008600"), lwd=2)
+```
+
+#Simple GLM 
+```{r, echo=TRUE, eval=FALSE}
+suppressWarnings(library('caret')) #For the model fitting
+suppressWarnings(library('pROC')) #Display and analyse ROC curves
+```
+
+```{r, echo=TRUE, eval=FALSE}
+#transform 'outcome' into factor type
+diabetes$outcome = as.character(diabetes$outcome)
+diabetes$outcome[diabetes$outcome == '0'] = 'Neg'
+diabetes$outcome[diabetes$outcome == '1'] = 'Pos'
+diabetes$outcome = factor(diabetes$outcome, levels = c('Pos', 'Neg'))
+```
+
+```{r, echo=TRUE, eval=FALSE}
+set.seed(100)
+trainIndex <- createDataPartition(diabetes$outcome, p = .7, list = FALSE, times = 1)
+
+train = diabetes[trainIndex,]
+test  = diabetes[-trainIndex,]
+```
+
+```{r, echo=TRUE, eval=FALSE}
+set.seed(1) #Set seed to ensure reproducible results
+
+fitControl = trainControl(method = "repeatedcv", number = 10, repeats = 20, summaryFunction = twoClassSummary, 
+                           classProbs = TRUE, savePredictions = T)
+```
+
+```{r, echo=TRUE, eval=FALSE}
+#clear nera zero variables
+#x = nearZeroVar(diabetes, saveMetrics = TRUE)
+#str(x, vec.len=2)
+```
+
+```{r, echo=TRUE, eval=FALSE}
+#badCols <- nearZeroVar(train)
+#train <- train[, -badCols]
+```
+
+```{r, echo=TRUE, eval=FALSE}
+model = train(outcome ~., data = train, 
+                          method = 'glm',
+                          preProcess = c('center', 'scale'),
+                          trControl = fitControl,
+                          metric = 'ROC')
+```
+
+```{r, echo=TRUE, eval=FALSE}
+getTrainPerf(model)
+```
+
+```{r, echo=TRUE, eval=FALSE}
+#compute auc 
+roc = roc(as.numeric(model$trainingData$.outcome=='Pos'),aggregate(Pos~rowIndex,model$pred,mean)[,'Pos'], ci=T)
+
+set.seed(123)
+
+par(pty="s")
+plot(roc, lty = 1, lwd = 5, print.auc=T)
+lines(roc, lty = 1, lwd = 5)
+
+c = coords(roc, x = "best", best.method = 'youden')
+
+abline(v = c[2], col = 'blue')
+abline(h = c[3], col = 'blue')
+```
+
+
+
+
+
+
+
+
+
+
